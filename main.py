@@ -7,38 +7,53 @@ import os
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import JSONResponse
 
-app = FastAPI(title="CV Analyzer API", version="4.0.0")
+app = FastAPI(title="CV Analyzer API", version="5.0.0")
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
 MODEL = "llama3.2"
 
 # ---------------------------------------------------------------------------
-# MAPEO DE MESES
+# MAPEO DE MESES → número
 # ---------------------------------------------------------------------------
-MESES = {
-    "enero": "Enero", "ene": "Enero",
-    "febrero": "Febrero", "feb": "Febrero",
-    "marzo": "Marzo", "mar": "Marzo",
-    "abril": "Abril", "abr": "Abril",
-    "mayo": "Mayo", "may": "Mayo",
-    "junio": "Junio", "jun": "Junio",
-    "julio": "Julio", "jul": "Julio",
-    "agosto": "Agosto", "ago": "Agosto",
-    "septiembre": "Septiembre", "sep": "Septiembre", "sept": "Septiembre",
-    "octubre": "Octubre", "oct": "Octubre",
-    "noviembre": "Noviembre", "nov": "Noviembre",
-    "diciembre": "Diciembre", "dic": "Diciembre",
+MESES_NUM = {
+    "enero": 1,   "ene": 1,
+    "febrero": 2, "feb": 2,
+    "marzo": 3,   "mar": 3,
+    "abril": 4,   "abr": 4,
+    "mayo": 5,    "may": 5,
+    "junio": 6,   "jun": 6,
+    "julio": 7,   "jul": 7,
+    "agosto": 8,  "ago": 8,
+    "septiembre": 9, "sep": 9, "sept": 9,
+    "octubre": 10,   "oct": 10,
+    "noviembre": 11, "nov": 11,
+    "diciembre": 12, "dic": 12,
 }
 
-def normalizar_mes(texto: str) -> str:
-    """Convierte abreviatura o nombre de mes a forma capitalizada."""
-    t = texto.strip().lower()
-    return MESES.get(t, texto.strip().capitalize())
+# Para el prompt seguimos usando nombres de mes en español
+MESES_NOMBRE = {v: k.capitalize() for k, v in MESES_NUM.items() if len(k) > 3}
 
-def parsear_fecha(texto: str):
+def mes_a_numero(texto: str):
+    """Convierte nombre/abreviatura de mes a número entero, o None si no aplica."""
+    return MESES_NUM.get(texto.strip().lower())
+
+def fecha_a_dict(dia=None, mes=None, anio=None):
     """
-    Recibe un string de fecha y devuelve (fecha_inicio, fecha_fin).
-    Maneja todos los patrones encontrados en los 3 CVs.
+    Construye el objeto de fecha con campos numéricos.
+    Todos los campos son int o None.
+    """
+    return {
+        "dia":  int(dia)  if dia  is not None else None,
+        "mes":  int(mes)  if mes  is not None else None,
+        "anio": int(anio) if anio is not None else None,
+    }
+
+def parsear_fecha_str(texto: str):
+    """
+    Recibe un string de fecha y devuelve una tupla:
+      (fecha_inicio_dict, fecha_fin_dict | "Actualidad" | None)
+
+    Cada fecha_dict tiene la forma: {"dia": int|None, "mes": int|None, "anio": int|None}
     """
     if not texto:
         return None, None
@@ -47,11 +62,14 @@ def parsear_fecha(texto: str):
 
     # Patrón: "mes año - mes año"  o  "mes año a mes año"
     m = re.match(
-        r'(\w+)\s+(\d{4})\s*(?:-|a|al|hasta)\s*(\w+)\s+(\d{4})',
+        r'(\w+)\s+(\d{4})\s*(?:-|–|a|al|hasta)\s*(\w+)\s+(\d{4})',
         t, re.IGNORECASE
     )
     if m:
-        return f"{normalizar_mes(m.group(1))} {m.group(2)}", f"{normalizar_mes(m.group(3))} {m.group(4)}"
+        return (
+            fecha_a_dict(mes=mes_a_numero(m.group(1)), anio=m.group(2)),
+            fecha_a_dict(mes=mes_a_numero(m.group(3)), anio=m.group(4)),
+        )
 
     # Patrón: "mes año - actualidad/presente"
     m = re.match(
@@ -59,38 +77,45 @@ def parsear_fecha(texto: str):
         t, re.IGNORECASE
     )
     if m:
-        return f"{normalizar_mes(m.group(1))} {m.group(2)}", "Actualidad"
+        return (
+            fecha_a_dict(mes=mes_a_numero(m.group(1)), anio=m.group(2)),
+            "Actualidad",
+        )
 
-    # Patrón: "mes año - presente" abreviado (may 2024 - presente)
-    m = re.match(
-        r'(\w{3,})\s+(\d{4})\s*[-–]\s*(presente|actualidad|actual)',
-        t, re.IGNORECASE
-    )
+    # Patrón: "año-año"
+    m = re.match(r'^(\d{4})\s*[-–]\s*(\d{4})$', t)
     if m:
-        return f"{normalizar_mes(m.group(1))} {m.group(2)}", "Actualidad"
-
-    # Patrón: "año-año" o "año - año"
-    m = re.match(r'(\d{4})\s*[-–]\s*(\d{4})', t)
-    if m:
-        return m.group(1), m.group(2)
+        return (
+            fecha_a_dict(anio=m.group(1)),
+            fecha_a_dict(anio=m.group(2)),
+        )
 
     # Patrón: "mes a mes año" → "Marzo a Noviembre 2021"
     m = re.match(r'(\w+)\s+a\s+(\w+)\s+(\d{4})', t, re.IGNORECASE)
     if m:
         anio = m.group(3)
-        return f"{normalizar_mes(m.group(1))} {anio}", f"{normalizar_mes(m.group(2))} {anio}"
+        return (
+            fecha_a_dict(mes=mes_a_numero(m.group(1)), anio=anio),
+            fecha_a_dict(mes=mes_a_numero(m.group(2)), anio=anio),
+        )
 
     # Patrón: "mes año" solo
-    m = re.match(r'(\w+)\s+(\d{4})$', t, re.IGNORECASE)
+    m = re.match(r'^(\w+)\s+(\d{4})$', t, re.IGNORECASE)
     if m:
-        return f"{normalizar_mes(m.group(1))} {m.group(2)}", None
+        return fecha_a_dict(mes=mes_a_numero(m.group(1)), anio=m.group(2)), None
 
     # Solo año
     m = re.match(r'^(\d{4})$', t)
     if m:
-        return m.group(1), None
+        return fecha_a_dict(anio=m.group(1)), None
 
-    return t, None  # Devolver tal cual si no matchea nada
+    return None, None
+
+
+def normalizar_mes(texto: str) -> str:
+    """Para uso en el prompt: convierte abreviatura a nombre completo."""
+    n = mes_a_numero(texto)
+    return MESES_NOMBRE.get(n, texto.strip().capitalize()) if n else texto.strip().capitalize()
 
 
 # ---------------------------------------------------------------------------
@@ -238,12 +263,12 @@ def extract_with_regex(text: str) -> list:
             fecha_raw = m.group(2).strip()
             empresa_raw = m.group(3).strip()
 
-            # Limpiar empresa (quitar texto después de punto o paréntesis largo)
+            # Limpiar empresa
             empresa = re.split(r'\s*[\(\[]|\s{2,}', empresa_raw)[0].strip()
             empresa = re.sub(r'\.$', '', empresa).strip()
 
-            # Parsear fechas
-            f_inicio, f_fin = parsear_fecha(fecha_raw)
+            # Parsear fechas → dicts numéricos
+            f_inicio, f_fin = parsear_fecha_str(fecha_raw)
 
             key = (cargo.lower()[:30], empresa.lower()[:30])
             if key not in seen and len(cargo) > 3 and len(empresa) > 3:
@@ -326,8 +351,34 @@ def parse_json_response(response: str) -> list:
 NORMALIZAR_FIN = {"actualidad", "presente", "actual", "present",
                   "current", "a la fecha", "hoy", "today", "vigente"}
 
+def string_to_fecha_dict(valor):
+    """
+    Convierte un valor de fecha (string o dict) al formato numérico estándar.
+    Acepta: "Mayo 2022", "2022", {"dia":None,"mes":5,"anio":2022}, "Actualidad", None
+    """
+    if valor is None:
+        return None
+    if valor == "Actualidad":
+        return "Actualidad"
+    if isinstance(valor, dict):
+        # Ya es dict, asegurar tipos numéricos
+        return fecha_a_dict(
+            dia=valor.get("dia"),
+            mes=valor.get("mes"),
+            anio=valor.get("anio"),
+        )
+    if isinstance(valor, str):
+        # Verificar si es "actualidad"
+        if valor.lower() in NORMALIZAR_FIN:
+            return "Actualidad"
+        # Intentar parsear como fecha
+        fi, _ = parsear_fecha_str(valor)
+        return fi
+    return None
+
+
 def clean_and_fix_dates(items: list) -> list:
-    """Limpia empresas, normaliza fechas y divide cargos con |"""
+    """Limpia empresas, convierte fechas a formato numérico y divide cargos con |"""
     result = []
     seen = set()
 
@@ -337,8 +388,8 @@ def clean_and_fix_dates(items: list) -> list:
 
         cargo   = (item.get("cargo") or "").strip()
         empresa = (item.get("empresa") or "").strip()
-        f_ini   = (item.get("fecha_inicio") or "").strip() or None
-        f_fin   = (item.get("fecha_fin") or "").strip() or None
+        f_ini   = item.get("fecha_inicio")
+        f_fin   = item.get("fecha_fin")
 
         # Limpiar "En " al inicio
         for prefix in ["En ", "en "]:
@@ -347,15 +398,18 @@ def clean_and_fix_dates(items: list) -> list:
             if cargo.startswith(prefix):
                 cargo = cargo[len(prefix):]
 
-        # Si fecha_inicio contiene un rango "XXXX-XXXX", separar
-        if f_ini and not f_fin:
-            fi2, ff2 = parsear_fecha(f_ini)
-            if ff2:  # Se encontró un rango
-                f_ini, f_fin = fi2, ff2
+        # Convertir fechas al formato numérico
+        f_ini = string_to_fecha_dict(f_ini)
+        f_fin = string_to_fecha_dict(f_fin)
 
-        # Normalizar "presente/actualidad"
-        if f_fin and f_fin.lower() in NORMALIZAR_FIN:
-            f_fin = "Actualidad"
+        # Si fecha_inicio es un dict con solo anio y parece rango (modelo devolvió "2014-2016")
+        # Esto ya no debería ocurrir con parsear_fecha_str, pero por si acaso:
+        if isinstance(f_ini, dict) and f_ini.get("anio") and not f_fin:
+            raw = item.get("fecha_inicio", "")
+            if isinstance(raw, str):
+                _, ff = parsear_fecha_str(raw)
+                if ff:
+                    f_fin = string_to_fecha_dict(ff)
 
         # Dividir cargo con "|"
         cargos = [c.strip() for c in cargo.split("|")] if "|" in cargo else [cargo]
