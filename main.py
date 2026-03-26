@@ -7,140 +7,115 @@ import os
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import JSONResponse
 
-app = FastAPI(title="CV Analyzer API", version="5.0.0")
+app = FastAPI(title="CV Analyzer API", version="5.1.0")
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
 MODEL = "llama3"
 
-# ---------------------------------------------------------------------------
-# MAPEO DE MESES → número
-# ---------------------------------------------------------------------------
-MESES_NUM = {
+MONTH_MAP = {
     "enero": 1,
     "ene": 1,
+    "january": 1,
+    "jan": 1,
     "febrero": 2,
     "feb": 2,
+    "february": 2,
     "marzo": 3,
     "mar": 3,
+    "march": 3,
     "abril": 4,
     "abr": 4,
+    "april": 4,
     "mayo": 5,
     "may": 5,
     "junio": 6,
     "jun": 6,
+    "june": 6,
     "julio": 7,
     "jul": 7,
+    "july": 7,
     "agosto": 8,
     "ago": 8,
+    "august": 8,
     "septiembre": 9,
     "sep": 9,
     "sept": 9,
+    "september": 9,
     "octubre": 10,
     "oct": 10,
+    "october": 10,
     "noviembre": 11,
     "nov": 11,
+    "november": 11,
     "diciembre": 12,
     "dic": 12,
+    "december": 12,
+    "dec": 12,
 }
 
-# Para el prompt seguimos usando nombres de mes en español
-MESES_NOMBRE = {v: k.capitalize() for k, v in MESES_NUM.items() if len(k) > 3}
+CURRENT_WORDS = {"actualidad", "presente", "actual", "current", "hoy", "vigente"}
 
 
-def mes_a_numero(texto: str):
-    """Convierte nombre/abreviatura de mes a número entero, o None si no aplica."""
-    return MESES_NUM.get(texto.strip().lower())
+def parse_month(text: str) -> int | None:
+    return MONTH_MAP.get(text.strip().lower())
 
 
-def fecha_a_dict(dia=None, mes=None, anio=None):
-    """
-    Construye el objeto de fecha con campos numéricos.
-    Todos los campos son int o None.
-    """
+def to_date_dict(day=None, month=None, year=None) -> dict | None:
+    if day is None and month is None and year is None:
+        return None
     return {
-        "dia": int(dia) if dia is not None else None,
-        "mes": int(mes) if mes is not None else None,
-        "anio": int(anio) if anio is not None else None,
+        "day": int(day) if day else None,
+        "month": int(month) if month else None,
+        "year": int(year) if year else None,
     }
 
 
-def parsear_fecha_str(texto: str):
-    """
-    Recibe un string de fecha y devuelve una tupla:
-      (fecha_inicio_dict, fecha_fin_dict | "Actualidad" | None)
-
-    Cada fecha_dict tiene la forma: {"dia": int|None, "mes": int|None, "anio": int|None}
-    """
-    if not texto:
+def parse_date_string(text: str) -> tuple[dict | None, dict | None | str]:
+    if not text:
         return None, None
 
-    t = texto.strip()
+    text = text.strip()
 
-    # Patrón: "mes año - mes año"  o  "mes año a mes año"
-    m = re.match(
-        r"(\w+)\s+(\d{4})\s*(?:-|–|a|al|hasta)\s*(\w+)\s+(\d{4})", t, re.IGNORECASE
-    )
-    if m:
+    # "month year - month year" or "month year a month year"
+    if m := re.match(
+        r"(\w+)\s+(\d{4})\s*(?:-|–|a|al|hasta)\s*(\w+)\s+(\d{4})", text, re.IGNORECASE
+    ):
         return (
-            fecha_a_dict(mes=mes_a_numero(m.group(1)), anio=m.group(2)),
-            fecha_a_dict(mes=mes_a_numero(m.group(3)), anio=m.group(4)),
+            to_date_dict(month=parse_month(m.group(1)), year=m.group(2)),
+            to_date_dict(month=parse_month(m.group(3)), year=m.group(4)),
         )
 
-    # Patrón: "mes año - actualidad/presente"
-    m = re.match(
+    # "month year - current/present"
+    if m := re.match(
         r"(\w+)\s+(\d{4})\s*[-–]\s*(actualidad|presente|actual|hoy|vigente)",
-        t,
+        text,
         re.IGNORECASE,
-    )
-    if m:
+    ):
         return (
-            fecha_a_dict(mes=mes_a_numero(m.group(1)), anio=m.group(2)),
-            "Actualidad",
+            to_date_dict(month=parse_month(m.group(1)), year=m.group(2)),
+            "Current",
         )
 
-    # Patrón: "año-año"
-    m = re.match(r"^(\d{4})\s*[-–]\s*(\d{4})$", t)
-    if m:
+    # "year-year"
+    if m := re.match(r"^(\d{4})\s*[-–]\s*(\d{4})$", text):
+        return to_date_dict(year=m.group(1)), to_date_dict(year=m.group(2))
+
+    # "month a month year" -> "March to November 2021"
+    if m := re.match(r"(\w+)\s+a\s+(\w+)\s+(\d{4})", text, re.IGNORECASE):
         return (
-            fecha_a_dict(anio=m.group(1)),
-            fecha_a_dict(anio=m.group(2)),
+            to_date_dict(month=parse_month(m.group(1)), year=m.group(3)),
+            to_date_dict(month=parse_month(m.group(2)), year=m.group(3)),
         )
 
-    # Patrón: "mes a mes año" → "Marzo a Noviembre 2021"
-    m = re.match(r"(\w+)\s+a\s+(\w+)\s+(\d{4})", t, re.IGNORECASE)
-    if m:
-        anio = m.group(3)
-        return (
-            fecha_a_dict(mes=mes_a_numero(m.group(1)), anio=anio),
-            fecha_a_dict(mes=mes_a_numero(m.group(2)), anio=anio),
-        )
+    # "month year" only
+    if m := re.match(r"^(\w+)\s+(\d{4})$", text, re.IGNORECASE):
+        return to_date_dict(month=parse_month(m.group(1)), year=m.group(2)), None
 
-    # Patrón: "mes año" solo
-    m = re.match(r"^(\w+)\s+(\d{4})$", t, re.IGNORECASE)
-    if m:
-        return fecha_a_dict(mes=mes_a_numero(m.group(1)), anio=m.group(2)), None
-
-    # Solo año
-    m = re.match(r"^(\d{4})$", t)
-    if m:
-        return fecha_a_dict(anio=m.group(1)), None
+    # year only
+    if m := re.match(r"^(\d{4})$", text):
+        return to_date_dict(year=m.group(1)), None
 
     return None, None
-
-
-def normalizar_mes(texto: str) -> str:
-    """Para uso en el prompt: convierte abreviatura a nombre completo."""
-    n = mes_a_numero(texto)
-    return (
-        MESES_NOMBRE.get(n, texto.strip().capitalize())
-        if n
-        else texto.strip().capitalize()
-    )
-
-
-# ---------------------------------------------------------------------------
-# 1. EXTRACCIÓN DE TEXTO
-# ---------------------------------------------------------------------------
 
 
 def extract_text_from_pdf(file_path: str) -> str:
@@ -154,12 +129,11 @@ def extract_text_from_pdf(file_path: str) -> str:
 
 
 def extract_experience_section(full_text: str, max_chars: int = 5000) -> str:
-    """Extrae solo la sección de experiencia laboral."""
-    EXP_HEADERS = re.compile(
+    exp_headers = re.compile(
         r"(experiencia\s+(?:laboral|como|profesional|de\s+trabajo)|work\s+experience)",
         re.IGNORECASE,
     )
-    EXP_END = re.compile(
+    exp_end = re.compile(
         r"\n\s*(titulaci[oó]n\s+acad|formaci[oó]n\s+acad|certificacion|"
         r"competencia\s+profesion|referencias\s+person|aptitudes|"
         r"habilidades\s*\n|idiomas\s*\n|cursos\s+y\s+|educaci[oó]n\s*\n|"
@@ -167,25 +141,16 @@ def extract_experience_section(full_text: str, max_chars: int = 5000) -> str:
         re.IGNORECASE,
     )
 
-    start_match = EXP_HEADERS.search(full_text)
-    if not start_match:
-        return full_text[:max_chars]
+    if start_match := exp_headers.search(full_text):
+        start_idx = start_match.start()
+        text_from_exp = full_text[start_idx:]
+        if end_match := exp_end.search(text_from_exp[50:]):
+            section = text_from_exp[: 50 + end_match.start()]
+        else:
+            section = text_from_exp
+        return section[:max_chars] if len(section) > 200 else full_text[:max_chars]
 
-    start_idx = start_match.start()
-    text_from_exp = full_text[start_idx:]
-
-    end_match = EXP_END.search(text_from_exp[50:])
-    if end_match:
-        section = text_from_exp[: 50 + end_match.start()]
-    else:
-        section = text_from_exp
-
-    return section[:max_chars] if len(section) > 200 else full_text[:max_chars]
-
-
-# ---------------------------------------------------------------------------
-# 2. LLAMADA A OLLAMA
-# ---------------------------------------------------------------------------
+    return full_text[:max_chars]
 
 
 def call_ollama(prompt: str, max_tokens: int = 2000) -> str:
@@ -215,10 +180,6 @@ def call_ollama(prompt: str, max_tokens: int = 2000) -> str:
                     continue
     return full_response.strip()
 
-
-# ---------------------------------------------------------------------------
-# 3. VERIFICACIÓN: ¿ES UN CV?
-# ---------------------------------------------------------------------------
 
 CV_KEYWORDS = [
     "experiencia laboral",
@@ -254,101 +215,34 @@ def verify_is_cv(text: str) -> bool:
     matches = sum(1 for kw in CV_KEYWORDS if kw in text_lower)
     if matches >= 2:
         return True
-    prompt = f'¿Es este texto una hoja de vida? Responde solo "SI" o "NO":\n\n{text[:500]}\n\nRespuesta:'
+    prompt = (
+        f'Is this text a resume? Answer only "YES" or "NO":\n\n{text[:500]}\n\nAnswer:'
+    )
     response = call_ollama(prompt, max_tokens=5).strip().upper()
-    return any(w in response for w in ["SI", "SÍ", "YES"])
+    return any(w in response for w in ["SI", "SÍ", "YES", "Y"])
 
 
-# ---------------------------------------------------------------------------
-# 4. EXTRACCIÓN HÍBRIDA: REGEX PRIMERO, MODELO COMO RESPALDO
-# ---------------------------------------------------------------------------
+EXTRACTION_PROMPT = """Extract ALL work experience from this CV. Return ONLY a valid JSON array, no extra text, no markdown.
 
-# Patrón para CVs tipo "Cargo, año-año, Empresa" (estilo Iván Andrade)
-# Ej: "Gerente de Contrato, 2014-2016 en (CFE) la Comisión Federal..."
-REGEX_PATTERN_NARRATIVE = re.compile(
-    r"^([A-ZÁÉÍÓÚÑÜ][^,\n]{3,60}?),?\s*"  # Cargo (empieza con mayúscula)
-    r"(\d{4}[-–]\d{4}|"  # fecha año-año
-    r"\w+\s+a\s+\w+\s+(?:de\s+)?\d{4}|"  # mes a mes año
-    r"\w+\s+\d{4}\s*[-–a]\s*\w+\s+\d{4}|"  # mes año - mes año
-    r"\w+\s+\d{4}|"  # mes año
-    r"\d{4})"  # solo año
-    r"[,\s]+(?:en\s+)?(.+?)(?:\.|$)",  # empresa
-    re.MULTILINE | re.IGNORECASE,
-)
+CRITICAL RULES:
+1. job_title = exact position title. NEVER company name.
+2. company = full organization name, without "En" prefix. NO truncation.
+3. ALWAYS separate start_date and end_date as objects with day, month, year:
+   - "2014-2016" → start:{day:null, month:null, year:2014} end:{day:null, month:null, year:2016}
+   - "may 2022" → start:{day:null, month:5, year:2022} end:null
+   - "march 2017 to june 2017" → start:{day:null, month:3, year:2017} end:{day:null, month:6, year:2017}
+   - "15/03/2020 - 20/08/2022" → start:{day:15, month:3, year:2020} end:{day:20, month:8, year:2022}
+   - "present/current" → end:"Current"
+4. If no date identifiable, use {day:null, month:null, year:null}
+5. DO NOT invent dates. If not in text, use null.
+6. Include: jobs, internships, consulting, project management
+7. Exclude: courses, certifications, academic education, volunteering without dates
 
+MONTH MAP (number):
+1=january, 2=february, 3=march, 4=april, 5=may, 6=june, 7=july, 8=august, 9=september, 10=october, 11=november, 12=december
 
-def extract_with_regex(text: str) -> list:
-    """
-    Extracción por regex para CVs con experiencia narrada en párrafos.
-    Patrón: 'Cargo, fecha, en Empresa descripción...'
-    """
-    results = []
-    seen = set()
-
-    patterns = [
-        re.compile(
-            r"\b(Director[^,\n]{0,60}?|Gerente[^,\n]{0,60}?|Especialista[^,\n]{0,60}?|"
-            r"Asesor[^,\n]{0,60}?|Director\s+T[eé]cnico[^,\n]{0,40}?)"
-            r",\s*"
-            r"(\d{4}[-–]\d{4}|\w+\s+a\s+\w+\s+(?:de\s+)?\d{4}|"
-            r"\w+\s+\d{4}\s*[-–]\s*\w+\s+\d{4}|\d{4})"
-            r",?\s*(?:en\s+)?"
-            r"([A-ZÁÉÍÓÚÑÜ][^\n.]{5,80})",
-            re.IGNORECASE,
-        ),
-    ]
-
-    for pattern in patterns:
-        for m in pattern.finditer(text):
-            cargo = m.group(1).strip().rstrip(",")
-            fecha_raw = m.group(2).strip()
-            empresa_raw = m.group(3).strip()
-
-            # Limpiar empresa
-            empresa = re.split(r"\s*[\(\[]|\s{2,}", empresa_raw)[0].strip()
-            empresa = re.sub(r"\.$", "", empresa).strip()
-
-            # Parsear fechas → dicts numéricos
-            f_inicio, f_fin = parsear_fecha_str(fecha_raw)
-
-            key = (cargo.lower()[:30], empresa.lower()[:30])
-            if key not in seen and len(cargo) > 3 and len(empresa) > 3:
-                seen.add(key)
-                results.append(
-                    {
-                        "cargo": cargo,
-                        "empresa": empresa,
-                        "fecha_inicio": f_inicio,
-                        "fecha_fin": f_fin,
-                    }
-                )
-
-    return results
-
-
-EXTRACTION_PROMPT = """Extrae TODA la experiencia laboral de este CV. Devuelve SOLO un JSON array válido, sin texto extra, sin markdown.
-
-REGLAS CRÍTICAS:
-1. cargo = título exacto del puesto. NUNCA nombre de empresa.
-2. empresa = nombre completo de la organización, sin "En" al inicio. NO truncar.
-3. SIEMPRE separar fecha_inicio y fecha_fin en objetos con dia, mes, anio:
-   - "2014-2016" → inicio:{dia:null, mes:null, anio:2014} fin:{dia:null, mes:null, anio:2016}
-   - "mayo 2022" → inicio:{dia:null, mes:5, anio:2022} fin:null
-   - "marzo 2017 a junio 2017" → inicio:{dia:null, mes:3, anio:2017} fin:{dia:null, mes:6, anio:2017}
-   - "15/03/2020 - 20/08/2022" → inicio:{dia:15, mes:3, anio:2020} fin:{dia:20, mes:8, anio:2022}
-   - "15 de marzo de 2020" → inicio:{dia:15, mes:3, anio:2020} fin:null
-   - "presente/actualidad" → fin:"Actualidad"
-4. Si NO hay fecha identificable, usar {dia:null, mes:null, anio:null}
-5. NO inventar fechas. Si no está en el texto, es null.
-6. Incluir: empleos, pasantías, consultoría, dirección de proyectos, peritajes
-7. Excluir: cursos, certificaciones, formación académica, voluntariado sin fecha
-8. Si cargo tiene "|", crear DOS entradas con misma empresa y fechas.
-
-MAPA DE MESES (número):
-1=enero, 2=febrero, 3=marzo, 4=abril, 5=mayo, 6=junio, 7=julio, 8=agosto, 9=septiembre, 10=octubre, 11=noviembre, 12=diciembre
-
-FORMATO EXACTO (cada fecha es un objeto con dia, mes, anio):
-[{"cargo":"...","empresa":"...","fecha_inicio":{"dia":null,"mes":5,"anio":2022},"fecha_fin":{"dia":null,"mes":null,"anio":2024}}]
+EXACT FORMAT (each date is object with day, month, year):
+[{"job_title":"...","company":"...","start_date":{"day":null,"month":5,"year":2022},"end_date":{"day":null,"month":null,"year":2024}}]
 
 CV:
 {cv_text}
@@ -359,8 +253,7 @@ JSON:"""
 def parse_json_response(response: str) -> list:
     response = re.sub(r"```(?:json)?\s*", "", response).strip()
 
-    m = re.search(r"\[.*\]", response, re.DOTALL)
-    if m:
+    if m := re.search(r"\[.*\]", response, re.DOTALL):
         try:
             data = json.loads(m.group())
             if isinstance(data, list):
@@ -368,11 +261,16 @@ def parse_json_response(response: str) -> list:
         except json.JSONDecodeError:
             pass
 
-    m = re.search(r"\{.*\}", response, re.DOTALL)
-    if m:
+    if m := re.search(r"\{.*\}", response, re.DOTALL):
         try:
             obj = json.loads(m.group())
-            for key in ["experiencia", "experience", "experiencia_laboral", "jobs"]:
+            for key in [
+                "experiencia",
+                "experience",
+                "experiencia_laboral",
+                "jobs",
+                "work_experience",
+            ]:
                 if key in obj and isinstance(obj[key], list):
                     return obj[key]
         except json.JSONDecodeError:
@@ -389,47 +287,26 @@ def parse_json_response(response: str) -> list:
     return []
 
 
-NORMALIZAR_FIN = {
-    "actualidad",
-    "presente",
-    "actual",
-    "present",
-    "current",
-    "a la fecha",
-    "hoy",
-    "today",
-    "vigente",
-}
-
-
-def string_to_fecha_dict(valor):
-    """
-    Convierte un valor de fecha (string o dict) al formato numérico estándar.
-    Acepta: "Mayo 2022", "2022", {"dia":None,"mes":5,"anio":2022}, "Actualidad", None
-    """
-    if valor is None:
+def convert_date_value(value):
+    if value is None:
         return None
-    if valor == "Actualidad":
-        return "Actualidad"
-    if isinstance(valor, dict):
-        # Ya es dict, asegurar tipos numéricos
-        return fecha_a_dict(
-            dia=valor.get("dia"),
-            mes=valor.get("mes"),
-            anio=valor.get("anio"),
+    if value == "Current":
+        return "Current"
+    if isinstance(value, dict):
+        return to_date_dict(
+            day=value.get("day"),
+            month=value.get("month"),
+            year=value.get("year"),
         )
-    if isinstance(valor, str):
-        # Verificar si es "actualidad"
-        if valor.lower() in NORMALIZAR_FIN:
-            return "Actualidad"
-        # Intentar parsear como fecha
-        fi, _ = parsear_fecha_str(valor)
-        return fi
+    if isinstance(value, str):
+        if value.lower() in CURRENT_WORDS:
+            return "Current"
+        start, _ = parse_date_string(value)
+        return start
     return None
 
 
-def clean_and_fix_dates(items: list) -> list:
-    """Limpia empresas, convierte fechas a formato numérico y divide cargos con |"""
+def clean_items(items: list) -> list:
     result = []
     seen = set()
 
@@ -437,76 +314,106 @@ def clean_and_fix_dates(items: list) -> list:
         if not isinstance(item, dict):
             continue
 
-        cargo = (item.get("cargo") or "").strip()
-        empresa = (item.get("empresa") or "").strip()
-        f_ini = item.get("fecha_inicio")
-        f_fin = item.get("fecha_fin")
+        job_title = (item.get("job_title") or item.get("cargo") or "").strip()
+        company = (item.get("company") or item.get("empresa") or "").strip()
+        start_date = item.get("start_date") or item.get("fecha_inicio")
+        end_date = item.get("end_date") or item.get("fecha_fin")
 
-        # Limpiar "En " al inicio
+        # Remove "En " prefix
         for prefix in ["En ", "en "]:
-            if empresa.startswith(prefix):
-                empresa = empresa[len(prefix) :]
-            if cargo.startswith(prefix):
-                cargo = cargo[len(prefix) :]
+            if company.startswith(prefix):
+                company = company[len(prefix) :]
+            if job_title.startswith(prefix):
+                job_title = job_title[len(prefix) :]
 
-        # Convertir fechas al formato numérico
-        f_ini = string_to_fecha_dict(f_ini)
-        f_fin = string_to_fecha_dict(f_fin)
+        # Convert dates to numeric format
+        start_date = convert_date_value(start_date)
+        end_date = convert_date_value(end_date)
 
-        # Si fecha_inicio es un dict con solo anio y parece rango (modelo devolvió "2014-2016")
-        # Esto ya no debería ocurrir con parsear_fecha_str, pero por si acaso:
-        if isinstance(f_ini, dict) and f_ini.get("anio") and not f_fin:
-            raw = item.get("fecha_inicio", "")
-            if isinstance(raw, str):
-                _, ff = parsear_fecha_str(raw)
-                if ff:
-                    f_fin = string_to_fecha_dict(ff)
+        # Split job title by "|"
+        titles = (
+            [t.strip() for t in job_title.split("|")]
+            if "|" in job_title
+            else [job_title]
+        )
 
-        # Dividir cargo con "|"
-        cargos = [c.strip() for c in cargo.split("|")] if "|" in cargo else [cargo]
-
-        for c in cargos:
-            if not c or not empresa:
+        for title in titles:
+            if not title or not company:
                 continue
-            key = (c.lower()[:40], empresa.lower()[:40], str(f_ini))
+            key = (title.lower()[:40], company.lower()[:40], str(start_date))
             if key not in seen:
                 seen.add(key)
                 result.append(
                     {
-                        "cargo": c,
-                        "empresa": empresa,
-                        "fecha_inicio": f_ini,
-                        "fecha_fin": f_fin,
+                        "job_title": title,
+                        "company": company,
+                        "start_date": start_date,
+                        "end_date": end_date,
                     }
                 )
 
     return result
 
 
-# ---------------------------------------------------------------------------
-# 5. EXTRACCIÓN PRINCIPAL
-# ---------------------------------------------------------------------------
+def extract_with_regex(text: str) -> list:
+    results = []
+    seen = set()
+
+    pattern = re.compile(
+        r"\b(Director[^,\n]{0,60}?|Gerente[^,\n]{0,60}?|Especialista[^,\n]{0,60}?|"
+        r"Asesor[^,\n]{0,60}?|Director\s+T[eé]cnico[^,\n]{0,40}?)"
+        r",\s*"
+        r"(\d{4}[-–]\d{4}|\w+\s+a\s+\w+\s+(?:de\s+)?\d{4}|"
+        r"\w+\s+\d{4}\s*[-–]\s*\w+\s+\d{4}|\d{4})"
+        r",?\s*(?:en\s+)?"
+        r"([A-ZÁÉÍÓÚÑÜ][^\n.]{5,80})",
+        re.IGNORECASE,
+    )
+
+    for m in pattern.finditer(text):
+        job_title = m.group(1).strip().rstrip(",")
+        date_raw = m.group(2).strip()
+        company_raw = m.group(3).strip()
+
+        # Clean company
+        company = re.split(r"\s*[\(\[]|\s{2,}", company_raw)[0].strip()
+        company = re.sub(r"\.$", "", company).strip()
+
+        # Parse dates
+        start_date, end_date = parse_date_string(date_raw)
+
+        key = (job_title.lower()[:30], company.lower()[:30])
+        if key not in seen and len(job_title) > 3 and len(company) > 3:
+            seen.add(key)
+            results.append(
+                {
+                    "job_title": job_title,
+                    "company": company,
+                    "start_date": start_date,
+                    "end_date": end_date,
+                }
+            )
+
+    return results
 
 
 def extract_work_experience(full_text: str) -> list:
     section = extract_experience_section(full_text, max_chars=5000)
 
-    # Paso 1: intentar extracción con el modelo
     prompt = EXTRACTION_PROMPT.replace("{cv_text}", section)
     response = call_ollama(prompt, max_tokens=2000)
     items = parse_json_response(response)
-    results = clean_and_fix_dates(items)
+    results = clean_items(items)
 
-    # Paso 2: complementar con regex para entradas que el modelo haya perdido
+    # Complement with regex for entries model might have missed
     regex_items = extract_with_regex(section)
-    regex_cleaned = clean_and_fix_dates(regex_items)
+    regex_cleaned = clean_items(regex_items)
 
-    # Merge: agregar entradas de regex que no estén ya en los resultados del modelo
     existing_keys = {
-        (r["cargo"].lower()[:30], r["empresa"].lower()[:30]) for r in results
+        (r["job_title"].lower()[:30], r["company"].lower()[:30]) for r in results
     }
     for item in regex_cleaned:
-        key = (item["cargo"].lower()[:30], item["empresa"].lower()[:30])
+        key = (item["job_title"].lower()[:30], item["company"].lower()[:30])
         if key not in existing_keys:
             results.append(item)
             existing_keys.add(key)
@@ -514,15 +421,10 @@ def extract_work_experience(full_text: str) -> list:
     return results
 
 
-# ---------------------------------------------------------------------------
-# 6. ENDPOINTS
-# ---------------------------------------------------------------------------
-
-
 @app.post("/analizar-cv")
-async def analizar_cv(file: UploadFile = File(...)):
+async def analyze_cv(file: UploadFile = File(...)):
     if not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Solo se aceptan archivos PDF.")
+        raise HTTPException(status_code=400, detail="Only PDF files are accepted.")
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         content = await file.read()
@@ -535,14 +437,14 @@ async def analizar_cv(file: UploadFile = File(...)):
         if not text or len(text) < 50:
             raise HTTPException(
                 status_code=422,
-                detail="No se pudo extraer texto del PDF. Puede ser un PDF escaneado sin OCR.",
+                detail="Could not extract text from PDF. It may be a scanned PDF without OCR.",
             )
 
         if not verify_is_cv(text):
             return JSONResponse(
                 content={
                     "es_cv": False,
-                    "mensaje": "El documento no parece ser una hoja de vida o CV.",
+                    "message": "The document does not appear to be a resume or CV.",
                     "experiencia_laboral": [],
                 }
             )
@@ -552,7 +454,7 @@ async def analizar_cv(file: UploadFile = File(...)):
         return JSONResponse(
             content={
                 "es_cv": True,
-                "archivo": file.filename,
+                "file": file.filename,
                 "total_experiencias": len(experiencia),
                 "experiencia_laboral": experiencia,
             }
@@ -568,7 +470,7 @@ async def health():
         with httpx.Client(timeout=5.0) as client:
             r = client.get("http://localhost:11434/api/tags")
             models = [m["name"] for m in r.json().get("models", [])]
-        return {"status": "ok", "ollama": "conectado", "modelos_disponibles": models}
+        return {"status": "ok", "ollama": "connected", "available_models": models}
     except Exception as e:
         return {"status": "error", "ollama": str(e)}
 
