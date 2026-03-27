@@ -59,7 +59,7 @@ app = FastAPI(title=APP_TITLE, version=APP_VERSION)
 
 @app.post("/analizar-cv")
 async def analyze_cv(file: UploadFile = File(...)):
-    if not file.filename.lower().endswith(".pdf"):
+    if not str(file.filename).lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are accepted.")
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
