@@ -25,7 +25,7 @@ VERIFY_MAX_TOKENS = int(os.getenv("VERIFY_MAX_TOKENS", "5"))
 EXTRACTION_MAX_TOKENS = int(os.getenv("EXTRACTION_MAX_TOKENS", "1200"))
 EXPERIENCE_SECTION_MAX_CHARS = int(os.getenv("EXPERIENCE_SECTION_MAX_CHARS", "3000"))
 PDF_LEFT_CROP_RATIO = float(os.getenv("PDF_LEFT_CROP_RATIO", "0.68"))
-PDF_RIGHT_CROP_START_RATIO = float(os.getenv("PDF_RIGHT_CROP_START_RATIO", "0.35"))
+PDF_RIGHT_CROP_START_RATIO = float(os.getenv("PDF_RIGHT_CROP_START_RATIO", "0.30"))
 ENABLE_REMOTE_EXTRACTION = (
     os.getenv("ENABLE_REMOTE_EXTRACTION", "true").strip().lower() == "true"
 )
@@ -55,6 +55,10 @@ MONTH_ALIASES = {
 }
 
 CURRENT_WORDS = {"actualidad", "presente", "actual", "current", "hoy", "vigente"}
+LONG_DATE_PATTERN = re.compile(
+    r"(\d{1,2})\s+de\s+([A-Za-zÁÉÍÓÚáéíóúÑñ.]+)\s+(?:del\s+)?(\d{4})",
+    re.IGNORECASE,
+)
 
 
 def parse_month(text: str) -> int | None:
@@ -76,6 +80,8 @@ def parse_month(text: str) -> int | None:
 def to_date_dict(day=None, month=None, year=None) -> dict | None:
     if day is None and month is None and year is None:
         return None
+    if year is not None and not (1900 <= int(year) <= 2100):
+        return None
     return {
         "day": int(day) if day else None,
         "month": int(month) if month else None,
@@ -88,10 +94,40 @@ def parse_date_string(text: str) -> tuple[dict | None, dict | None | str]:
         return None, None
 
     text = text.strip()
+    normalized = sanitize_date_text(text)
+
+    # "day month year - day month year"
+    if matches := list(LONG_DATE_PATTERN.finditer(text)):
+        start = matches[0]
+        start_date = to_date_dict(
+            day=start.group(1),
+            month=parse_month(start.group(2)),
+            year=start.group(3),
+        )
+
+        if len(matches) > 1:
+            end = matches[1]
+            end_date = to_date_dict(
+                day=end.group(1),
+                month=parse_month(end.group(2)),
+                year=end.group(3),
+            )
+            return start_date, end_date
+
+        if re.search(
+            r"(?:-|–|a|al|hasta|to)\s*(actualidad|presente|actual|current|hoy|vigente)",
+            normalized,
+            re.IGNORECASE,
+        ):
+            return start_date, "Current"
+
+        return start_date, None
 
     # "month year - month year" or "month year a month year"
     if m := re.match(
-        r"(\w+)\s+(\d{4})\s*(?:-|–|a|al|hasta)\s*(\w+)\s+(\d{4})", text, re.IGNORECASE
+        r"(\w+)\s+(\d{4})\s*(?:-|–|a|al|hasta|to)\s*(\w+)\s+(\d{4})",
+        normalized,
+        re.IGNORECASE,
     ):
         return (
             to_date_dict(month=parse_month(m.group(1)), year=m.group(2)),
@@ -101,7 +137,7 @@ def parse_date_string(text: str) -> tuple[dict | None, dict | None | str]:
     # "month year - current/present"
     if m := re.match(
         r"(\w+)\s+(\d{4})\s*[-–]\s*(actualidad|presente|actual|hoy|vigente)",
-        text,
+        normalized,
         re.IGNORECASE,
     ):
         return (
@@ -110,22 +146,22 @@ def parse_date_string(text: str) -> tuple[dict | None, dict | None | str]:
         )
 
     # "year-year"
-    if m := re.match(r"^(\d{4})\s*[-–]\s*(\d{4})$", text):
+    if m := re.match(r"^(\d{4})\s*[-–]\s*(\d{4})$", normalized):
         return to_date_dict(year=m.group(1)), to_date_dict(year=m.group(2))
 
     # "month a month year" -> "March to November 2021"
-    if m := re.match(r"(\w+)\s+a\s+(\w+)\s+(\d{4})", text, re.IGNORECASE):
+    if m := re.match(r"(\w+)\s+a\s+(\w+)\s+(\d{4})", normalized, re.IGNORECASE):
         return (
             to_date_dict(month=parse_month(m.group(1)), year=m.group(3)),
             to_date_dict(month=parse_month(m.group(2)), year=m.group(3)),
         )
 
     # "month year" only
-    if m := re.match(r"^(\w+)\s+(\d{4})$", text, re.IGNORECASE):
+    if m := re.match(r"^(\w+)\s+(\d{4})$", normalized, re.IGNORECASE):
         return to_date_dict(month=parse_month(m.group(1)), year=m.group(2)), None
 
     # year only
-    if m := re.match(r"^(\d{4})$", text):
+    if m := re.match(r"^(\d{4})$", normalized):
         return to_date_dict(year=m.group(1)), None
 
     return None, None
@@ -154,14 +190,14 @@ def extract_text_from_pdf(
 
 def extract_experience_section(full_text: str, max_chars: int = 5000) -> str:
     exp_headers = re.compile(
-        r"(^|\n)\s*(experiencia(?:\s+laboral)?|work\s+experience)\s*(\n|$)",
+        r"(^|\n)\s*(experiencia(?:\s+laboral)?|experiencia\s+como\s+director\s+de\s+proyectos|work\s+experience)\s*(\n|$)",
         re.IGNORECASE,
     )
     exp_end = re.compile(
         r"\n\s*(titulaci[oó]n\s+acad|formaci[oó]n\s+acad|certificacion|"
         r"competencia\s+profesion|referencias\s+person|aptitudes|"
         r"habilidades\s*\n|idiomas\s*\n|cursos\s+y\s+|educaci[oó]n\s*\n|"
-        r"principales\s+pericias)",
+        r"principales\s+pericias|proyectos\s+destacados|desarrollo\s+m[oó]vil|arquitectura\s*&\s*patrones|backend\s*&\s*databases)",
         re.IGNORECASE,
     )
 
@@ -283,6 +319,7 @@ def normalize_text(text: str) -> str:
 
 def clean_job_title(text: str) -> str:
     title = re.sub(r"\s+", " ", text.strip(" -|."))
+    title = re.sub(r"^(laboral\s+)", "", title, flags=re.IGNORECASE)
     return re.sub(r"^(en\s+)", "", title, flags=re.IGNORECASE).strip()
 
 
@@ -789,11 +826,127 @@ def extract_with_regex(text: str) -> list:
     return results
 
 
+def extract_structured_role_entries(text: str) -> list:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    results = []
+
+    for i, line in enumerate(lines):
+        if looks_like_section_end(line):
+            break
+
+        next_line = lines[i + 1] if i + 1 < len(lines) else ""
+
+        # Pattern: ROLE / COMPANY | DATE
+        parsed_company, start_date, end_date = parse_company_date_line(next_line)
+        if (
+            looks_like_job_title_line(line)
+            and parsed_company
+            and start_date
+            and "|" in next_line
+        ):
+            results.append(
+                {
+                    "job_title": refine_job_title(line),
+                    "company": parsed_company,
+                    "start_date": start_date,
+                    "end_date": end_date,
+                }
+            )
+            continue
+
+        # Pattern: Role, 2014-2016 en Company
+        if match := re.match(
+            rf"^(.+?),\s*({DATE_VALUE_PATTERN}\s*(?:-|–|a|al|hasta|to)\s*{DATE_VALUE_PATTERN}|{DATE_VALUE_PATTERN})\s+en\s+(.+)$",
+            line,
+            re.IGNORECASE,
+        ):
+            job_title = refine_job_title(match.group(1))
+            start_date, end_date = parse_date_string(sanitize_date_text(match.group(2)))
+            company = clean_company_name(match.group(3))
+            if looks_like_job_title_line(job_title) and company and start_date:
+                results.append(
+                    {
+                        "job_title": job_title,
+                        "company": company,
+                        "start_date": start_date,
+                        "end_date": end_date,
+                    }
+                )
+                continue
+
+        # Pattern for uppercase role line followed by company/date on next line
+        parsed_company, start_date, end_date = parse_company_date_line(next_line)
+        alpha_chars = [ch for ch in line if ch.isalpha()]
+        if (
+            parsed_company
+            and start_date
+            and alpha_chars
+            and sum(1 for ch in alpha_chars if ch.isupper()) / len(alpha_chars) > 0.7
+            and len(line.split()) >= 2
+        ):
+            results.append(
+                {
+                    "job_title": refine_job_title(line.title()),
+                    "company": parsed_company,
+                    "start_date": start_date,
+                    "end_date": end_date,
+                }
+            )
+
+    return results
+
+
+def extract_consulting_entries(text: str) -> list:
+    normalized_text = re.sub(r"\s+", " ", text)
+    results = []
+
+    patterns = [
+        re.compile(
+            rf"(Gerente\s+de\s+Contrato|Director\s+General\s+de\s+Proyecto|Director\s+de\s+Control\s+y\s+Programaci[oó]n|Especialista\s+en\s+Control\s+y\s+Planillas|Director\s+de\s+Proyecto(?:\s*\([^)]+\))?)"
+            rf",\s*({DATE_VALUE_PATTERN}\s*(?:-|–|a|al|hasta|to)\s*{DATE_VALUE_PATTERN}|{DATE_VALUE_PATTERN})"
+            rf"(?:\s+en)?\s*,?\s*([^.;]{8,180})",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            rf"(Director\s+T[eé]cnico(?:\s*\([^)]+\))?)\s+en\s+([^,.;]{{5,160}}),\s*({DATE_VALUE_PATTERN}\s*(?:-|–|a|al|hasta|to)\s*{DATE_VALUE_PATTERN}|{DATE_VALUE_PATTERN})",
+            re.IGNORECASE,
+        ),
+    ]
+
+    for pattern in patterns:
+        for match in pattern.finditer(normalized_text):
+            if pattern is patterns[1]:
+                job_title = refine_job_title(match.group(1))
+                company = clean_company_name(match.group(2))
+                date_raw = sanitize_date_text(match.group(3))
+            else:
+                job_title = refine_job_title(match.group(1))
+                date_raw = sanitize_date_text(match.group(2))
+                company = clean_company_name(match.group(3))
+
+            start_date, end_date = parse_date_string(date_raw)
+            if looks_like_job_title_line(job_title) and company and start_date:
+                results.append(
+                    {
+                        "job_title": job_title,
+                        "company": company,
+                        "start_date": start_date,
+                        "end_date": end_date,
+                    }
+                )
+
+    return results
+
+
 def extract_work_experience(full_text: str, allow_remote_refine: bool = False) -> list:
     section = extract_experience_section(full_text, max_chars=EXPERIENCE_SECTION_MAX_CHARS)
 
     # Keep a local fallback ready in case the remote model is slow or unavailable.
-    regex_items = extract_with_regex(section)
+    regex_items = (
+        extract_with_regex(section)
+        + extract_structured_role_entries(section)
+        + extract_consulting_entries(section)
+    )
     regex_cleaned = clean_items(regex_items)
     local_is_reliable = score_items(regex_cleaned) >= (len(regex_cleaned) * 8)
     if regex_cleaned and (
